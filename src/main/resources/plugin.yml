@@ -1,0 +1,27 @@
+name: SingleDungeon
+version: '${version}'
+main: com.github.jenya705.sd.SingleDungeon
+api-version: 1.18
+authors: [ Jenya705 ]
+description: SingleDungeon
+softdepend: [ ProtocolLib ]
+commands:
+  start:
+    permission: singledungeon.start
+  stats:
+    permission: singledungeon.stats
+  leave:
+    permission: singledungeon.leave
+permissions:
+  singledungeon.*:
+    children:
+      - singledungeon.start
+      - singledungeon.stats
+      - singledungeon.leave
+    default: true
+  singledungeon.start:
+    default: true
+  singledungeon.stats:
+    default: true
+  singledungeon.leave:
+    default: true
