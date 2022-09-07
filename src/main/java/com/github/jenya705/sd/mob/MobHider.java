@@ -2,14 +2,19 @@ package com.github.jenya705.sd.mob;
 
 import com.comphenix.protocol.PacketType;
 import com.comphenix.protocol.events.PacketAdapter;
+import com.comphenix.protocol.events.PacketContainer;
 import com.comphenix.protocol.events.PacketEvent;
 import com.github.jenya705.sd.SingleDungeon;
 import com.github.jenya705.sd.arena.ArenaManager;
 import org.bukkit.Bukkit;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Listener;
 
+import java.lang.reflect.InvocationTargetException;
+import java.util.List;
 import java.util.UUID;
+import java.util.logging.Level;
 
 public class MobHider extends PacketAdapter implements Listener {
 
@@ -79,6 +84,22 @@ public class MobHider extends PacketAdapter implements Listener {
         return !arenaMob || arenaSession.getMobs()
                 .stream()
                 .anyMatch(mob -> mob.getEntityId() == entityID);
+    }
+
+    public void hideEntities(Player except, List<? extends Entity> entities) {
+        PacketContainer removePacket = new PacketContainer(PacketType.Play.Server.ENTITY_DESTROY);
+        removePacket.getIntLists().write(
+                0,
+                entities.stream().map(Entity::getEntityId).toList()
+        );
+        for (Player onlinePlayer : plugin.getServer().getOnlinePlayers()) {
+            if (onlinePlayer.equals(except)) continue;
+            try {
+                plugin.getProtocolManager().sendServerPacket(onlinePlayer, removePacket);
+            } catch (InvocationTargetException e) {
+                plugin.getLogger().log(Level.SEVERE, "Exception while sending ENTITY_DESTROY packet:", e);
+            }
+        }
     }
 
 }

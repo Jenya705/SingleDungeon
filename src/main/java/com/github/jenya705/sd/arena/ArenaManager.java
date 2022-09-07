@@ -1,21 +1,23 @@
 package com.github.jenya705.sd.arena;
 
-import com.comphenix.protocol.PacketType;
-import com.comphenix.protocol.events.PacketContainer;
 import com.github.jenya705.sd.SingleDungeon;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.attribute.Attribute;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Mob;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.PlayerInventory;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.scheduler.BukkitTask;
 
-import java.lang.reflect.InvocationTargetException;
 import java.util.*;
 import java.util.function.Consumer;
-import java.util.logging.Level;
 import java.util.stream.Collectors;
 
 @RequiredArgsConstructor
@@ -25,8 +27,10 @@ public class ArenaManager {
     public static class Session {
         private final List<Mob> mobs = new ArrayList<>();
         private final ArenaManager arenaManager;
-        private final Location previousPlayerLocation;
+        private final PlayerData playerData;
         private final Player player;
+
+        private BukkitTask waveSpawnTask;
 
         private int currentWave = 1;
 
@@ -37,10 +41,72 @@ public class ArenaManager {
         }
     }
 
+    @RequiredArgsConstructor
+    public static class PlayerData {
+
+        public static PlayerData fromPlayer(Player player) {
+            return new PlayerData(
+                    Arrays.copyOf(player.getInventory().getContents(), player.getInventory().getSize()),
+                    player.getFoodLevel(),
+                    player.getExhaustion(),
+                    player.getHealth(),
+                    player.getRemainingAir(),
+                    player.getTotalExperience(),
+                    new ArrayList<>(player.getActivePotionEffects()),
+                    player.getLocation()
+            );
+        }
+
+        private final ItemStack[] inventory;
+        private final int food;
+        private final float exhaustion;
+        private final double health;
+        private final int air;
+        private final int exp;
+        private final List<PotionEffect> effects;
+        private final Location location;
+
+        public void rollback(Player player) {
+            player.getInventory().setContents(inventory);
+            player.setFoodLevel(food);
+            player.setExhaustion(exhaustion);
+            player.setHealth(health);
+            player.setRemainingAir(air);
+            player.setTotalExperience(exp);
+            player.getActivePotionEffects()
+                    .forEach(potionEffect -> player.removePotionEffect(potionEffect.getType()));
+            effects.forEach(player::addPotionEffect);
+            player.teleport(location);
+        }
+
+
+    }
+
     @Data
     private static class SessionLinkedMob {
         private final Mob mob;
         private final Session session;
+    }
+
+    public static void fillPlayerInventory(PlayerInventory playerInventory) {
+        playerInventory.clear();
+        playerInventory.setHelmet(new ItemStack(Material.DIAMOND_HELMET));
+        playerInventory.setChestplate(new ItemStack(Material.DIAMOND_CHESTPLATE));
+        playerInventory.setLeggings(new ItemStack(Material.DIAMOND_LEGGINGS));
+        playerInventory.setBoots(new ItemStack(Material.DIAMOND_BOOTS));
+        playerInventory.setItem(0, new ItemStack(Material.DIAMOND_SWORD));
+        playerInventory.setItem(1, new ItemStack(Material.GOLDEN_APPLE, 32));
+    }
+
+    public static void setPlayerDefaults(Player player) {
+        fillPlayerInventory(player.getInventory());
+        player.setRemainingAir(player.getMaximumAir());
+        player.setHealth(player.getAttribute(Attribute.GENERIC_MAX_HEALTH).getBaseValue());
+        player.setFoodLevel(20);
+        player.setExhaustion(20);
+        player.setTotalExperience(0);
+        player.getActivePotionEffects()
+                .forEach(potionEffect -> player.removePotionEffect(potionEffect.getType()));
     }
 
     private final SingleDungeon plugin;
@@ -50,19 +116,28 @@ public class ArenaManager {
     private final Set<Integer> mobsId = new HashSet<>();
 
     public void enter(Player player) {
-        Location currentPlayerLocation = player.getLocation();
-        player.teleport(plugin.getSdConfig().getDungeonSpawn());
         Session arenaSession = new Session(
                 this,
-                currentPlayerLocation,
+                PlayerData.fromPlayer(player),
                 player
         );
+        setPlayerDefaults(player);
+        player.teleport(plugin.getSdConfig().getDungeonSpawn());
+        mobsId.add(player.getEntityId());
+        plugin.getMobHider().hideEntities(player, Collections.singletonList(player));
         sessions.put(player.getUniqueId(), arenaSession);
-        plugin.getServer().getScheduler().runTaskLater(
-                plugin,
-                () -> spawnMobs(arenaSession, player),
-                100
-        );
+        arenaSession.waveSpawnTask =
+                plugin.getServer().getScheduler().runTaskLater(
+                        plugin,
+                        () -> {
+                            spawnMobs(arenaSession, player);
+                            plugin.getStatsContainer().update(
+                                    player.getUniqueId(),
+                                    stats -> stats.setSessions(stats.getSessions() + 1)
+                            );
+                        },
+                        100
+                );
     }
 
     private final static EntityType[] MOB_SPAWNS = new EntityType[]{
@@ -83,48 +158,65 @@ public class ArenaManager {
                     spawned.setTarget(player);
                 }
             }
-            PacketContainer removePacket = new PacketContainer(PacketType.Play.Server.ENTITY_DESTROY);
-            removePacket.getIntLists().write(
-                    0,
-                    session.mobs.stream().map(Mob::getEntityId).toList()
-            );
-            for (Player onlinePlayer : plugin.getServer().getOnlinePlayers()) {
-                if (onlinePlayer.equals(player)) continue;
-                // TODO. Try to find better way
-                try {
-                    plugin.getProtocolManager().sendServerPacket(onlinePlayer, removePacket);
-                } catch (InvocationTargetException e) {
-                    plugin.getLogger().log(Level.SEVERE, "Exception while sending ENTITY_DESTROY packet:", e);
-                }
-            }
+            plugin.getMobHider().hideEntities(player, session.mobs);
         });
+        setCollisions(player, session.mobs);
+        player.sendMessage(session.currentWave + " wave spawned");
     }
 
     public Session getSession(UUID player) {
         return sessions.get(player);
     }
 
-    public void removeMob(Mob mob) {
+    public boolean removeMob(Mob mob) {
         SessionLinkedMob linkedMob = mobs.remove(mob.getUniqueId());
-        if (linkedMob == null) return;
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            linkedMob.session.mobs.remove(mob);
-            mobsId.remove(mob.getEntityId());
-            if (linkedMob.session.mobs.isEmpty()) {
-                nextWave(linkedMob.session);
-            }
-        });
+        if (linkedMob == null) return false;
+        linkedMob.session.waveSpawnTask =
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    linkedMob.session.mobs.remove(mob);
+                    mobsId.remove(mob.getEntityId());
+                    if (linkedMob.session.mobs.isEmpty()) {
+                        nextWave(linkedMob.session);
+                    }
+                });
+        plugin.getStatsContainer().update(
+                linkedMob.session.player.getUniqueId(),
+                stats -> stats.setMobKills(stats.getMobKills() + 1)
+        );
+        return true;
     }
 
-    public void endSession(Player player) {
+    public boolean endSession(Player player, boolean death) {
         Session arenaSession = sessions.remove(player.getUniqueId());
-        if (arenaSession == null) return;
+        if (arenaSession == null) return false;
+        if (arenaSession.waveSpawnTask != null) {
+            arenaSession.waveSpawnTask.cancel();
+        }
         arenaSession.getMobs().forEach(mob -> {
             mob.remove();
             mobsId.remove(mob.getEntityId());
             mobs.remove(mob.getUniqueId());
         });
-        player.teleport(arenaSession.getPreviousPlayerLocation());
+        mobsId.remove(player.getEntityId());
+        arenaSession.playerData.rollback(player);
+        removePlayerCollisions(player);
+        plugin.getProtocolManager().updateEntity(
+                player,
+                player.getWorld().getNearbyEntities(
+                        player.getLocation(),
+                        Bukkit.getViewDistance() * 16,
+                        Bukkit.getViewDistance() * 16,
+                        Bukkit.getViewDistance() * 16,
+                        e -> e instanceof Player
+                ).stream().map(e -> (Player) e).toList()
+        );
+        if (death) {
+            plugin.getStatsContainer().update(
+                    player.getUniqueId(),
+                    stats -> stats.setDeaths(stats.getDeaths() + 1)
+            );
+        }
+        return true;
     }
 
     public void nextWave(Session session) {
@@ -142,6 +234,34 @@ public class ArenaManager {
 
     public boolean isArenaMob(int mobId) {
         return mobsId.contains(mobId);
+    }
+
+    public boolean isAvailableMob(Player player, Mob mob) {
+        if (player.equals(mob)) return true;
+        Session session = getSession(player.getUniqueId());
+        if (session == null) return true;
+        SessionLinkedMob linkedMob = mobs.get(mob.getUniqueId());
+        if (linkedMob == null) return false;
+        return linkedMob.session.player.equals(player);
+    }
+
+    private static void setCollisions(Player player, List<Mob> mobs) {
+        List<UUID> collisions = mobs.stream()
+                .map(Mob::getUniqueId)
+                .collect(Collectors.toList());
+        player.setCollidable(false);
+        player.getCollidableExemptions().clear();
+        player.getCollidableExemptions().addAll(collisions);
+        collisions.add(player.getUniqueId());
+        mobs.forEach(mob -> {
+            mob.setCollidable(false);
+            mob.getCollidableExemptions().addAll(collisions);
+        });
+    }
+
+    private static void removePlayerCollisions(Player player) {
+        player.setCollidable(true);
+        player.getCollidableExemptions().clear();
     }
 
 }
