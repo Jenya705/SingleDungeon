@@ -50,7 +50,9 @@ public class StatsGUI implements Listener {
         );
         inventory.setItem(
                 5,
-                createItem(Material.REDSTONE, ChatColor.DARK_RED + "Average kills per session: " + stats.getAverageKills())
+                createItem(Material.REDSTONE, ChatColor.DARK_RED + "Average kills per session: " +
+                        "%.3f".formatted(stats.getAverageKills())
+                )
         );
         inventory.setItem(
                 7,
